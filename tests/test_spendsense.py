@@ -7,12 +7,12 @@ import pytest
 
 from spendsense.analytics import by_category, recurring_charges, totals
 from spendsense.cleaning import normalize_merchant
+from spendsense.export import to_safe_csv
 from spendsense.llm import categorize_with_llm, parse_tool_results
-from spendsense.parser import StatementFormatError, load_statement
+from spendsense.parser import ColumnMap, StatementFormatError, load_statement
 from spendsense.pii import mask_pii
 from spendsense.pipeline import apply_corrections, categorize
 from spendsense.rules import categorize_by_rules
-
 
 # ---------- Parser ----------
 
@@ -113,8 +113,8 @@ class FakeClient:
             raise RuntimeError("API down")
         prompt = kwargs["messages"][0]["content"]
         self.sent.append(prompt)
-        lines = [l for l in prompt.splitlines()[1:] if ":" in l]
-        ids = [int(l.split(":", 1)[0]) for l in lines]
+        lines = [line for line in prompt.splitlines()[1:] if ":" in line]
+        ids = [int(line.split(":", 1)[0]) for line in lines]
         results = [{"id": i, "category": self.category, "confidence": self.confidence} for i in ids]
         return SimpleNamespace(content=[SimpleNamespace(type="tool_use", input={"results": results})])
 
@@ -177,3 +177,49 @@ def test_recurring_detection_and_totals():
     t = totals(df)
     assert t["total_income"] == 800 and t["months"] == 3
     assert by_category(df).iloc[0]["category"] == "Subscriptions"
+
+
+# ---------- Messy real-world files ----------
+
+def test_headerless_debit_credit_export():
+    csv = (b"2026-10-01,TIM HORTONS #44,4.25,,4500********1234\n"
+           b"2026-10-02,PAYROLL DEPOSIT,,800.00,4500********1234\n")
+    df = load_statement(csv)
+    assert df["description"].tolist() == ["TIM HORTONS #44", "PAYROLL DEPOSIT"]
+    assert df["amount"].tolist() == [-4.25, 800.0]
+
+
+def test_skips_account_info_above_header():
+    csv = b"Account,Chequing 123\nFrom,2026-10-01\n\nDate,Description,Amount\n2026-10-03,NETFLIX,-16.49\n"
+    df = load_statement(csv)
+    assert df.loc[0, "description"] == "NETFLIX"
+    assert df.loc[0, "amount"] == -16.49
+
+
+def test_credit_card_sign_flip_and_day_first_dates():
+    df = load_statement(b"Date,Description,Amount\n03/04/2026,AMAZON,45.00\n", flip_sign=True, dayfirst=True)
+    assert df.loc[0, "amount"] == -45.0
+    assert df.loc[0, "date"] == pd.Timestamp("2026-04-03")
+
+
+def test_unknown_columns_give_mapping_info_then_manual_mapping_works():
+    csv = b"when,what,howmuch\n2026-10-01,COFFEE,-3.50\n"
+    with pytest.raises(StatementFormatError) as info:
+        load_statement(b"when,what,howmuch\nyesterday,coffee,lots\n")
+    assert info.value.columns == ["when", "what", "howmuch"]
+    df = load_statement(csv, mapping=ColumnMap(date="when", description="what", amount="howmuch"))
+    assert df.loc[0, "amount"] == -3.50
+
+
+@pytest.mark.parametrize("raw, leaked", [
+    ("RENT - 1155 RICHMOND ST PROPERTY MGMT", "RICHMOND"),
+    ("DELIVERY 45 KING STREET W L5B 1M2", "L5B"),
+])
+def test_addresses_and_postal_codes_are_masked(raw, leaked):
+    assert leaked not in mask_pii(raw)
+
+
+def test_export_neutralizes_formulas():
+    out = to_safe_csv(pd.DataFrame({"description": ["=HYPERLINK(\"x\")", "NETFLIX"], "amount": [-5.0, -16.49]}))
+    assert "'=HYPERLINK" in out
+    assert "-16.49" in out  # numbers untouched
