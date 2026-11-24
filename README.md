@@ -1,4 +1,6 @@
-# 💸 SpendSense
+# SpendSense
+
+[![CI](https://github.com/gowthaam1/SpendSense/actions/workflows/ci.yml/badge.svg)](https://github.com/gowthaam1/SpendSense/actions/workflows/ci.yml)
 
 **An AI transaction analyst for bank statements.** Upload a CSV export from your bank and SpendSense tells you where your money went: categorized transactions, monthly trends, recurring charges and a plain-language summary.
 
@@ -10,10 +12,10 @@ It's built the way a bank would want an AI feature built: personal information i
 
 ## Features
 
-- **Works with real bank exports**: generic `Date, Description, Amount`, debit/credit layouts, and RBC's CSV format
+- **Works with messy real bank exports**: generic `Date, Description, Amount`, debit/credit layouts and RBC's format are detected automatically; account-info rows above the header are skipped; files with no header row have their columns inferred from the data; and anything still unrecognised gets a column-mapping screen instead of an error. Toggles handle credit-card exports (purchases as positive numbers) and day/month dates
 - **Merchant cleanup**: `SQ *TIM HORTONS #4421 TORONTO ON` → `Tim Hortons`
 - **Rules-first, AI-second categorization**: known merchants are handled by deterministic rules; only unfamiliar ones go to Claude
-- **PII masking**: card and account numbers, emails, phone numbers and e-transfer names are replaced with tags like `[PERSON]` before the AI sees anything
+- **PII masking**: card and account numbers, emails, phone numbers, street addresses, postal codes and e-transfer names are replaced with tags like `[PERSON]` before the AI sees anything
 - **Structured, validated outputs**: Claude must return JSON matching a fixed schema (category from a fixed list + confidence 0–1); invalid answers are rejected
 - **Human-in-the-loop review**: low-confidence results go to a review queue; one correction applies to every transaction from that merchant
 - **Recurring charge detection**: finds subscriptions and bills that repeat monthly at a stable amount
@@ -42,11 +44,21 @@ CSV ─► parser ─► merchant cleanup ─► rules ────────�
 | Confidence threshold | Turns "the model might be wrong" into a visible, reviewable queue |
 | Masking before the API call | The model doesn't need anyone's card number or a friend's name to categorize a transaction |
 
+## Privacy and security
+
+- **Nothing is stored.** The uploaded file lives in memory for the browser session only; nothing is written to disk or a database.
+- **Masked before the model.** Only masked descriptions of unfamiliar merchants are sent to Claude, and the summary is built from totals only.
+- **Upload limit of 5 MB** and a row cap, so a huge file can't tie up the server.
+- **Safe export.** Text cells that start with `=`, `+`, `-` or `@` are neutralized in the downloaded CSV, so a crafted description can't run as a spreadsheet formula (CSV injection).
+- **Secrets stay out of git.** The API key comes from Streamlit secrets or an environment variable; `secrets.toml`, `.env` and `data/private/` are git-ignored and excluded from the Docker image.
+- **Dependencies are audited.** CI runs `pip-audit` on every push, and Dependabot opens PRs for outdated packages.
+- **Known limit:** masking is pattern-based, so it can miss a name that appears without a keyword like "E-TRANSFER". A production version would add a named-entity model as a second pass.
+
 ## Run it locally
 
 ```bash
-git clone https://github.com/<your-username>/spendsense.git
-cd spendsense
+git clone https://github.com/gowthaam1/SpendSense.git
+cd SpendSense
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
@@ -59,6 +71,13 @@ ANTHROPIC_API_KEY = "sk-ant-..."
 ```
 
 (`secrets.toml` is in `.gitignore`, so your key never gets committed.)
+
+### Or with Docker
+
+```bash
+docker build -t spendsense .
+docker run -p 8501:8501 -e ANTHROPIC_API_KEY=sk-ant-... spendsense   # key optional
+```
 
 ## Evaluation
 
@@ -77,12 +96,13 @@ This reports overall accuracy, how many transactions each layer handled, accurac
 pytest -q
 ```
 
-25 tests, no API key or network needed. A fake client stands in for Claude, and the tests check that:
+32 tests, no API key or network needed. GitHub Actions runs them on Python 3.11 and 3.12 on every push, along with `ruff` linting, a dependency audit and a Docker build. A fake client stands in for Claude, and the tests check that:
 - PII is masked in what's actually sent to the model
 - rule-matched merchants are never sent, and repeat merchants are sent once
 - invalid model output (unknown category, bad confidence, missing ids) falls back safely
 - an API failure doesn't crash the pipeline
-- parsing works for generic, debit/credit and RBC formats
+- parsing works for generic, debit/credit and RBC formats, headerless files, account-info preambles, credit-card sign flips and day-first dates
+- addresses and postal codes are masked, and exported CSVs can't carry spreadsheet formulas
 
 ## Deploy (free) on Streamlit Community Cloud
 
@@ -104,10 +124,12 @@ spendsense/
   pipeline.py              ties it together; confidence + corrections
   analytics.py             category/monthly totals, recurring detection
   summary.py               plain-language summary from totals only
+  export.py                CSV export with formula (CSV injection) protection
 scripts/
   make_sample_data.py      generates the synthetic statement
   evaluate.py              accuracy on the labeled set
 tests/                     pytest suite
+.github/workflows/ci.yml   lint, tests, dependency audit, Docker build
 data/                      sample statement + labeled eval set
 ```
 
@@ -122,4 +144,4 @@ data/                      sample statement + labeled eval set
 
 ## Tech
 
-Python · pandas · Streamlit · Anthropic Claude API (tool use / structured outputs) · Pydantic · pytest
+Python · pandas · Streamlit · Anthropic Claude API (tool use / structured outputs) · Pydantic · pytest · Docker · GitHub Actions
